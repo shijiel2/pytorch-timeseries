@@ -62,7 +62,7 @@ def load_ucr_data(data_path: Path,
     test = np.loadtxt(data_path / f'{experiment}_TEST', delimiter=',')
 
     if encoder is None:
-        encoder = OneHotEncoder(categories='auto', sparse=False)
+        encoder = OneHotEncoder(categories='auto', sparse_output=False)
         y_train = encoder.fit_transform(np.expand_dims(train[:, 0], axis=-1))
     else:
         y_train = encoder.transform(np.expand_dims(train[:, 0], axis=-1))
@@ -195,7 +195,7 @@ def load_ucr_trainer(model_path: Path) -> UCRTrainer:
     experiment = model_path.resolve().parts[-2]
     data_folder = model_path.resolve().parents[3]
 
-    model_dict = torch.load(model_path)
+    model_dict = torch.load(model_path,weights_only=False)
 
     model_class = getattr(models, model_dict['model']['model_class'])
     model = model_class(**model_dict['model']['input_args'])

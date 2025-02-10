@@ -1,4 +1,4 @@
-name: inception
+name: pytorch-timeseries
 channels:
   - pytorch
   - conda-forge
