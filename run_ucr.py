@@ -9,10 +9,10 @@ For the Synthetic Control dataset, softmax is used instead.
 from pathlib import Path
 import sys
 # sys.path.append('..')
+import torch
 
 from src import UCRTrainer, load_ucr_trainer
 from src.models import InceptionModel, LinearBaseline, FCNBaseline, ResNetBaseline
-
 
 def train_inception_ecg():
 
@@ -90,7 +90,25 @@ def train_inception_sc():
 
 
 if __name__ == '__main__':
-    train_inception_ecg()
-    train_linear_ecg()
-    train_fcn_ecg()
-    train_resnet_ecg()
+    # train_inception_ecg()
+    # train_linear_ecg()
+    # train_fcn_ecg()
+    # train_resnet_ecg()
+
+    factor = 0.001
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    data_folder = Path('data')
+
+    model = FCNBaseline(in_channels=1, num_pred_classes=1, factor=factor).to(device)
+
+    trainer = UCRTrainer(model=model, experiment='ECG200', data_folder=data_folder, factor=factor)
+    trainer.fit(device=device)
+
+    savepath = trainer.save_model()
+
+    new_trainer = load_ucr_trainer(savepath, factor=factor, device=device)
+    new_trainer.evaluate(device=device)
+
+    new_trainer.certify(device=device)

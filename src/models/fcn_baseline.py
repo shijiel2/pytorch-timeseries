@@ -16,7 +16,7 @@ class FCNBaseline(nn.Module):
         The number of output classes
     """
 
-    def __init__(self, in_channels: int, num_pred_classes: int = 1) -> None:
+    def __init__(self, in_channels: int, num_pred_classes: int = 1, factor=1.0) -> None:
         super().__init__()
 
         # for easier saving and loading
@@ -32,6 +32,11 @@ class FCNBaseline(nn.Module):
         ])
         self.final = nn.Linear(128, num_pred_classes)
 
+        self.factor = factor
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore
+        # feature scale up
+        x = x / self.factor
+
         x = self.layers(x)
         return self.final(x.mean(dim=-1))

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 import torch
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler, StandardScaler
 from sklearn.model_selection import train_test_split
 
 from torch import nn
@@ -53,14 +53,25 @@ UCR_DATASETS = ['Haptics', 'Worms', 'Computers', 'UWaveGestureLibraryAll',
 
 
 def load_ucr_data(data_path: Path,
-                  encoder: Optional[OneHotEncoder] = None
-                  ) -> Tuple[InputData, InputData, OneHotEncoder]:
+                  encoder: Optional[OneHotEncoder] = None,
+                  factor=1.0) -> Tuple[InputData, InputData, OneHotEncoder]:
 
     experiment = data_path.parts[-1]
 
     train = np.loadtxt(data_path / f'{experiment}_TRAIN', delimiter=',')
     test = np.loadtxt(data_path / f'{experiment}_TEST', delimiter=',')
 
+    # Data scaling 
+    # scaler = MinMaxScaler(feature_range=(-0.004, 0.004))
+    # scaler = StandardScaler()
+
+    # train = scaler.fit_transform(train)
+    # test = scaler.transform(test)
+
+    train = train * factor
+    test = test * factor
+
+    
     if encoder is None:
         encoder = OneHotEncoder(categories='auto', sparse_output=False)
         y_train = encoder.fit_transform(np.expand_dims(train[:, 0], axis=-1))
@@ -98,7 +109,7 @@ class UCRTrainer(BaseTrainer):
     """
 
     def __init__(self, model: nn.Module, experiment: str,
-                 data_folder: Path = Path('data')) -> None:
+                 data_folder: Path = Path('data'), factor=1.0) -> None:
         self.model = model
 
         self.experiment = experiment
@@ -114,16 +125,18 @@ class UCRTrainer(BaseTrainer):
 
         self.encoder: Optional[OneHotEncoder] = None
 
+        self.factor = factor
+
     def _load_data(self) -> Tuple[InputData, InputData]:
         assert self.experiment in UCR_DATASETS, \
             f'{self.experiment} must be one of the UCR datasets: ' \
             f'https://www.cs.ucr.edu/~eamonn/time_series_data/'
         experiment_datapath = self.data_folder / 'UCR_TS_Archive_2015' / self.experiment
         if self.encoder is None:
-            train, test, encoder = load_ucr_data(experiment_datapath)
+            train, test, encoder = load_ucr_data(experiment_datapath, factor=self.factor)
             self.encoder = encoder
         else:
-            train, test, _ = load_ucr_data(experiment_datapath, encoder=self.encoder)
+            train, test, _ = load_ucr_data(experiment_datapath, encoder=self.encoder, factor=self.factor)
         return train, test
 
     def get_loaders(self, batch_size: int, mode: str,
@@ -179,6 +192,7 @@ class UCRTrainer(BaseTrainer):
                 'model_class': self.model.__class__.__name__,
                 'state_dict': self.model.state_dict(),
                 'input_args': self.model.input_args,
+                'factor': self.factor,
             },
             'encoder': self.encoder
         }
@@ -190,7 +204,7 @@ class UCRTrainer(BaseTrainer):
         return savepath
 
 
-def load_ucr_trainer(model_path: Path) -> UCRTrainer:
+def load_ucr_trainer(model_path: Path, factor=1.0, device='cuda') -> UCRTrainer:
 
     experiment = model_path.resolve().parts[-2]
     data_folder = model_path.resolve().parents[3]
@@ -200,9 +214,11 @@ def load_ucr_trainer(model_path: Path) -> UCRTrainer:
     model_class = getattr(models, model_dict['model']['model_class'])
     model = model_class(**model_dict['model']['input_args'])
     model.load_state_dict(model_dict['model']['state_dict'])
+    model.factor = model_dict['model']['factor']
+    model.to(device)
 
     loaded_trainer = UCRTrainer(model, experiment=experiment,
-                                data_folder=data_folder)
+                                data_folder=data_folder, factor=factor)
     loaded_trainer.encoder = model_dict['encoder']
 
     return loaded_trainer

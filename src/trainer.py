@@ -6,6 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from src.certify import Smooth
 
 from typing import cast, Any, Dict, List, Tuple, Optional
 
@@ -43,7 +44,7 @@ class BaseTrainer:
 
     def fit(self, batch_size: int = 64, num_epochs: int = 100,
             val_size: float = 0.2, learning_rate: float = 0.01,
-            patience: int = 10) -> None:
+            patience: int = 10, device='cuda') -> None:
         """Trains the inception model
 
         Arguments
@@ -71,6 +72,7 @@ class BaseTrainer:
         for epoch in range(num_epochs):
             epoch_train_loss = []
             for x_t, y_t in train_loader:
+                x_t, y_t = x_t.to(device), y_t.to(device)
                 optimizer.zero_grad()
                 output = self.model(x_t)
                 if len(y_t.shape) == 1:
@@ -89,6 +91,7 @@ class BaseTrainer:
             self.model.eval()
             for x_v, y_v in cast(DataLoader, val_loader):
                 with torch.no_grad():
+                    x_v, y_v = x_v.to(device), y_v.to(device)
                     output = self.model(x_v)
                     if len(y_v.shape) == 1:
                         val_loss = F.binary_cross_entropy_with_logits(
@@ -116,8 +119,77 @@ class BaseTrainer:
                         self.model.load_state_dict(cast(Dict[str, torch.Tensor], best_state_dict))
                     print('Early stopping!')
                     return None
+    
+    def predict(self, x, num_classes):
 
-    def evaluate(self, batch_size: int = 64) -> None:
+        self.model.eval()
+
+        with torch.no_grad():
+            preds = self.model(x)
+            if num_classes == 2:
+                preds = torch.sigmoid(preds)
+            else:
+                preds = torch.softmax(preds, dim=-1)
+            preds = preds.detach().numpy()
+
+        if num_classes > 2:
+            return np.argmax(preds, axis=-1)
+        else:
+            return (preds > 0.5).astype(int)
+        
+    def lb_keogh_envelope(self, x, w):
+        """
+        Compute the LB_Keogh envelope for a time series tensor x of shape [channels, length]
+        without adding a batch dimension.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [channels, length].
+            w (int): Half-window size. The total window size will be 2*w + 1.
+
+        Returns:
+            U (torch.Tensor): Upper envelope of shape [channels, length].
+            L (torch.Tensor): Lower envelope of shape [channels, length].
+        """
+        kernel_size = 2 * w + 1
+
+        # Pad the time series along the length dimension using replicate padding.
+        # The padding is applied on both sides.
+        x_padded = F.pad(x, (w, w), mode='replicate')  # shape: [channels, length + 2*w]
+
+        # Create sliding windows along the length dimension.
+        # The resulting tensor has shape [channels, length, kernel_size].
+        x_windows = x_padded.unfold(dimension=1, size=kernel_size, step=1)
+
+        # Compute the upper envelope (max over the window) and the lower envelope (min over the window)
+        U = x_windows.max(dim=-1)[0]
+        L = x_windows.min(dim=-1)[0]
+
+        return U, L
+    
+    def lb_keogh_consume(self, x, w):
+        U, L = self.lb_keogh_envelope(x, w)
+        diff = torch.max(U - x, x - L)
+        return diff.sum()
+
+        
+    def certify(self, rm_batch_size: int=1000, sigma: float=0.2, device='cuda') -> None:
+        num_classes = self.get_num_classes()
+        smoothed_model = Smooth(self.model, num_classes=num_classes, sigma=sigma)
+
+        test_loader, _ = self.get_loaders(batch_size=1, mode='test')
+
+        true_list, preds_list = [], []
+        for x, y in test_loader:
+            with torch.no_grad():
+                x, y = x.to(device).squeeze(0), y.to(device).squeeze(0)
+                true_list.append(y.cpu().detach().numpy())
+                pred, rad = smoothed_model.rm_certify(x, n0=100, n=10000, alpha=0.001, batch_size=rm_batch_size)
+                lb_consume = self.lb_keogh_consume(x, 3)
+                print(f'Prediction: {pred}, Radius: {rad}, LB consume: {lb_consume}')
+                
+
+
+    def evaluate(self, batch_size: int = 64, device='cuda') -> None:
 
         test_loader, _ = self.get_loaders(batch_size, mode='test')
 
@@ -126,13 +198,14 @@ class BaseTrainer:
         true_list, preds_list = [], []
         for x, y in test_loader:
             with torch.no_grad():
-                true_list.append(y.detach().numpy())
+                x, y = x.to(device), y.to(device)
+                true_list.append(y.cpu().detach().numpy())
                 preds = self.model(x)
                 if len(y.shape) == 1:
                     preds = torch.sigmoid(preds)
                 else:
                     preds = torch.softmax(preds, dim=-1)
-                preds_list.append(preds.detach().numpy())
+                preds_list.append(preds.cpu().detach().numpy())
 
         true_np, preds_np = np.concatenate(true_list), np.concatenate(preds_list)
 
@@ -152,6 +225,23 @@ class BaseTrainer:
         else:
             return y_true, (y_preds > 0.5).astype(int)
 
+    def get_num_classes(self) -> int:
+        test_loader, _ = self.get_loaders(64, mode='test')
+        
+        # Retrieve the first batch from the data_loader
+        for _, y in test_loader:
+            with torch.no_grad():
+                y.detach().numpy()
+                break
+
+        # If y has more than one dimension, assume the last dimension represents classes.
+        if len(y.shape) > 1:
+            return y.shape[-1]
+        else:
+            # Otherwise, it is used in a binary classification problem
+            return 2
+
+    
     def get_loaders(self, batch_size: int, mode: str,
                     val_size: Optional[float] = None) -> Tuple[DataLoader, Optional[DataLoader]]:
         """
